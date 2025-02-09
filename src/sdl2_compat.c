@@ -5836,11 +5836,18 @@ SDL_InitSubSystem(Uint32 flags)
         SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, hint);
     }
 
+    /* Timer subsystem is implicitly initialized in SDL3 */
+    if (flags & SDL2_INIT_TIMER) {
+        ++timer_init;
+        flags &= ~SDL2_INIT_TIMER;
+    }
+
+    if (flags == 0) {
+        return 0;
+    }
+
     result = SDL3_InitSubSystem(flags) ? 0 : -1;
     if (result == 0) {
-        if (flags & SDL2_INIT_TIMER) {
-            ++timer_init;
-        }
         if (flags & SDL_INIT_VIDEO) {
             /* default SDL2 GL attributes */
             SDL_GL_SetAttribute(SDL2_GL_RED_SIZE, 3);
