@@ -1236,6 +1236,7 @@ typedef struct AudioDeviceList
 {
     AudioDeviceInfo *devices;
     int num_devices;
+    bool names_loaded;
 } AudioDeviceList;
 
 static SDL_Mutex *AudioDeviceLock = NULL;
@@ -7290,39 +7291,19 @@ static Uint16 GetDefaultSamplesFromFreq(int freq)
     return current_sample;
 }
 
-static int GetNumAudioDevices(int iscapture)
+static void FetchAudioDeviceNames(int iscapture)
 {
-    AudioDeviceList newlist;
     AudioDeviceList *list = iscapture ? &AudioSDL3RecordingDevices : &AudioSDL3PlaybackDevices;
-    SDL_AudioDeviceID *devices;
-    int num_devices;
     int i, j;
 
-    /* SDL_GetNumAudioDevices triggers a device redetect in SDL2, so we'll just build our list from here. */
-    devices = iscapture ? SDL3_GetAudioRecordingDevices(&num_devices) : SDL3_GetAudioPlaybackDevices(&num_devices);
-    if (!devices) {
-        return list->num_devices;  /* just return the existing one for now. Oh well. */
-    }
-
-    SDL3_zero(newlist);
-
-    if (num_devices > 0) {
-        const char **orignames = (const char **) SDL3_malloc(num_devices * sizeof (*orignames));
+    if (list->num_devices > 0 && !list->names_loaded) {
+        const char **orignames = (const char **) SDL3_malloc(list->num_devices * sizeof (*orignames));
         if (!orignames) {
-            SDL3_free(devices);
-            return list->num_devices;  /* just return the existing one for now. Oh well. */
+            return;
         }
 
-        newlist.num_devices = num_devices;
-        newlist.devices = (AudioDeviceInfo *) SDL3_malloc(sizeof (AudioDeviceInfo) * num_devices);
-        if (!newlist.devices) {
-            SDL3_free((void*) orignames);
-            SDL3_free(devices);
-            return list->num_devices;  /* just return the existing one for now. Oh well. */
-        }
-
-        for (i = 0; i < num_devices; i++) {
-            const char *newname = SDL3_GetAudioDeviceName(devices[i]);
+        for (i = 0; i < list->num_devices; i++) {
+            const char *newname = SDL3_GetAudioDeviceName(list->devices[i].devid);
             char *fullname = NULL;
             unsigned int dupenum = 0;
 
@@ -7351,21 +7332,44 @@ static int GetNumAudioDevices(int iscapture)
                 }
             }
 
-            if (!fullname) {
-                /* we're in real trouble now.  :/  */
-                for (j = 0; j < (i-1); j++) {
-                    SDL3_free(newlist.devices[j].name);
-                }
-                SDL3_free((void*) orignames);
-                SDL3_free(devices);
-                return list->num_devices;  /* just return the existing one for now. Oh well. */
-            }
-
-            newlist.devices[i].devid = devices[i];
-            newlist.devices[i].name = fullname;
+            SDL_assert(!list->devices[i].name);
+            list->devices[i].name = fullname;
         }
 
         SDL3_free((void*) orignames);
+        list->names_loaded = true;
+    }
+}
+
+/* Due to risk of deadlocks, we cannot call anything that acquires the audio device's lock here! */
+static int GetNumAudioDevices(int iscapture)
+{
+    AudioDeviceList newlist;
+    AudioDeviceList *list = iscapture ? &AudioSDL3RecordingDevices : &AudioSDL3PlaybackDevices;
+    SDL_AudioDeviceID *devices;
+    int num_devices;
+    int i;
+
+    /* SDL_GetNumAudioDevices triggers a device redetect in SDL2, so we'll just build our list from here. */
+    devices = iscapture ? SDL3_GetAudioRecordingDevices(&num_devices) : SDL3_GetAudioPlaybackDevices(&num_devices);
+    if (!devices) {
+        return list->num_devices;  /* just return the existing one for now. Oh well. */
+    }
+
+    SDL3_zero(newlist);
+
+    if (num_devices > 0) {
+        newlist.num_devices = num_devices;
+        newlist.devices = (AudioDeviceInfo *) SDL3_malloc(sizeof (AudioDeviceInfo) * num_devices);
+        if (!newlist.devices) {
+            SDL3_free(devices);
+            return list->num_devices;  /* just return the existing one for now. Oh well. */
+        }
+
+        for (i = 0; i < num_devices; i++) {
+            newlist.devices[i].devid = devices[i];
+            newlist.devices[i].name = NULL;  /* fetched later to avoid acquiring the device lock */
+        }
     }
 
     for (i = 0; i < list->num_devices; i++) {
@@ -7410,6 +7414,7 @@ SDL_GetAudioDeviceName(int idx, int iscapture)
     if ((idx < 0) || (idx >= list->num_devices)) {
         SDL3_InvalidParamError("index");
     } else {
+        FetchAudioDeviceNames(iscapture);
         retval = list->devices[idx].name;
     }
     SDL3_UnlockMutex(AudioDeviceLock);
@@ -7651,6 +7656,7 @@ static SDL_AudioDeviceID OpenAudioDeviceLocked(const char *devicename, int iscap
         AudioDeviceList *list = iscapture ? &AudioSDL3RecordingDevices : &AudioSDL3PlaybackDevices;
         const int total = list->num_devices;
         int i;
+        FetchAudioDeviceNames(iscapture);
         for (i = 0; i < total; i++) {
             if (SDL3_strcmp(list->devices[i].name, devicename) == 0) {
                 device3 = list->devices[i].devid;
